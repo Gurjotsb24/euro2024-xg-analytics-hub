@@ -43,14 +43,12 @@ An end-to-end Machine Learning, Spatial Visualization, and Generative AI dashboa
 
 ### Installation Steps
 
-1. **Clone the repository:**
-   ```bash
-   git clone [https://github.com/Gurjotsb24/euro2024-xg-analytics-hub.git](https://github.com/Gurjotsb24/euro2024-xg-analytics-hub.git)
-   cd euro2024-xg-analytics-hub
+1. Clone the repository:
+git clone https://github.com/Gurjotsb24/euro2024-xg-analytics-hub.git
+cd euro2024-xg-analytics-hub
 
-------
-
-# On Windows (PowerShell/Command Prompt)
+2. Create and activate a virtual environment:
+# On Windows (PowerShell / Command Prompt)
 python -m venv venv
 venv\Scripts\activate
 
@@ -58,7 +56,27 @@ venv\Scripts\activate
 python3 -m venv venv
 source venv/bin/activate
 
-
+3. Install required dependencies:
 pip install -r requirements.txt
+
+4. Configure Environment Variables:
+Create a .env file in the root project directory (you can copy .env.example) and add your Gemini API Key:
+GEMINI_API_KEY=your_actual_gemini_api_key_here
+
+5. Launch the Streamlit Dashboard:
+streamlit run app.py
+
+---
+
+## 📂 Project Structure
+
+euro2024-xg-analytics-hub/
+├── app.py              # Main Streamlit dashboard (ML pipelines & GenAI integration)
+├── requirements.txt    # Project dependencies
+├── .env.example        # Template for API credentials
+├── .gitignore          # Git exclusion rules (.env, venv/)
+└── README.md           # Project documentation
+
+
 
 
