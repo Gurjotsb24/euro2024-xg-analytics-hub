@@ -46,3 +46,18 @@ An end-to-end Machine Learning, Spatial Visualization, and Generative AI dashboa
    ```bash
    git clone [https://github.com/Gurjotsb24/euro2024-xg-analytics-hub.git](https://github.com/Gurjotsb24/euro2024-xg-analytics-hub.git)
    cd euro2024-xg-analytics-hub
+   
+2. **Create and activate a virtual environment:**
+   ```bash
+   # On Windows (PowerShell/Command Prompt)
+   python -m venv venv
+   venv\Scripts\activate
+
+   # On macOS/Linux
+   python3 -m venv venv
+   source venv/bin/activate
+
+  3. **Install required dependencies:**
+   ```bash
+   pip install -r requirements.txt
+
