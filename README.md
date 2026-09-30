@@ -64,18 +64,11 @@ Create a .env file in the root project directory (you can copy .env.example) and
 GEMINI_API_KEY=your_actual_gemini_api_key_here
 
 5. Launch the Streamlit Dashboard:
-streamlit run app.py
+   streamlit run app.py
 
 ---
 
-## 📂 Project Structure
 
-euro2024-xg-analytics-hub/
-├── app.py              # Main Streamlit dashboard (ML pipelines & GenAI integration)
-├── requirements.txt    # Project dependencies
-├── .env.example        # Template for API credentials
-├── .gitignore          # Git exclusion rules (.env, venv/)
-└── README.md           # Project documentation
 
 
 
