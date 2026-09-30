@@ -37,6 +37,7 @@ An end-to-end Machine Learning, Spatial Visualization, and Generative AI dashboa
 ## 🚀 Getting Started
 
 ### Prerequisites
+
 - Python 3.10 or higher
 - Google Gemini API Key ([Get an API key here](https://aistudio.google.com/))
 
@@ -46,18 +47,24 @@ An end-to-end Machine Learning, Spatial Visualization, and Generative AI dashboa
    ```bash
    git clone [https://github.com/Gurjotsb24/euro2024-xg-analytics-hub.git](https://github.com/Gurjotsb24/euro2024-xg-analytics-hub.git)
    cd euro2024-xg-analytics-hub
-   
-2. **Create and activate a virtual environment:**
-   ```bash
+
+2. Create and activate a virtual environment:
    # On Windows (PowerShell/Command Prompt)
-   python -m venv venv
-   venv\Scripts\activate
+python -m venv venv
+venv\Scripts\activate
 
-   # On macOS/Linux
-   python3 -m venv venv
-   source venv/bin/activate
+# On macOS/Linux
+python3 -m venv venv
+source venv/bin/activate
 
-  3. **Install required dependencies:**
-   ```bash
+3. Install required dependencies:
    pip install -r requirements.txt
 
+4. Configure Environment Variables:
+Create a .env file in the root project directory (you can copy .env.example) and add your Gemini API Key:
+  GEMINI_API_KEY=your_actual_gemini_api_key_here
+
+5. Launch the Streamlit Dashboard:
+  streamlit run app.py
+
+  
