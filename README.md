@@ -88,7 +88,7 @@ Setup
 1. Clone & Virtual Environment
 
 git clone https://github.com/Gurjotsb24/euro2024-xg-analytics-hub.git
-cd euro2024-xg-analytics-hub
+```cd euro2024-xg-analytics-hub
 
 # On Windows
 python -m venv venv
