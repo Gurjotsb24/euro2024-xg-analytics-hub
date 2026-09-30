@@ -73,3 +73,61 @@ GEMINI_API_KEY=your_actual_gemini_api_key_here
 
 
 
+An end-to-end Machine Learning, Spatial Visualization, and Generative AI dashboard designed to analyze shot performance, goal probability, and finishing efficiency at Euro 2024 using StatsBomb data.
+
+Features
+
+Pre-Shot xG Modeling: Predicts goal probability based on pre-shot spatial geometry (distance, angle) and situational context (headers, defensive pressure) using Logistic Regression
+Post-Shot xGOT Modeling: Measures shot execution and placement quality on target using goalmouth coordinates (Y-frame width and Z-frame height)
+Shooting Goals Added (SGA): Evaluates finishing execution using SGA = xGOT - xG to separate clinical placement from poor finishing
+3 Dynamic Analytics Modes: Individual Player Search, Team Performance Analysis, and Head-to-Head Scouting Comparisons
+AI Tactical Analyst: Powered by Gemini 3.5-flash via google-genai to generate real-time tactical and finishing scouting reports
+
+Setup
+
+1. Clone & Virtual Environment
+
+git clone https://github.com/Gurjotsb24/euro2024-xg-analytics-hub.git
+cd euro2024-xg-analytics-hub
+
+# On Windows
+python -m venv venv
+venv\Scripts\activate
+
+# On macOS/Linux
+python3 -m venv venv
+source venv/bin/activate
+
+2. Install Dependencies
+
+pip install -r requirements.txt
+
+3. Environment Variables
+
+Create .env file in the root directory with:
+GEMINI_API_KEY=your_actual_gemini_api_key_here
+
+4. Run Dashboard
+
+streamlit run app.py
+
+Project Structure
+
+euro2024-xg-analytics-hub/
+├── app.py              # Main Streamlit dashboard (ML pipelines & GenAI integration)
+├── requirements.txt    # Project dependencies
+├── .env.example        # Template for API credentials
+├── .gitignore          # Git exclusion rules (.env, venv/)
+└── README.md           # Project documentation
+
+Usage
+
+Start the Streamlit application using streamlit run app.py
+Select from "Individual Player", "Team Analysis", or "Player Comparison" modes from the sidebar
+Explore spatial shot maps, 2D goalmouth coordinates, and trigger AI-generated scouting reports
+
+
+
+
+
+
