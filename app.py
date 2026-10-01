@@ -139,33 +139,39 @@ def load_data_and_train_models():
     model_data.loc[on_target_indices, 'xgot'] = xgot_model.predict_proba(X_xgot)[:, 1]
     model_data['sga'] = model_data['xgot'] - model_data['custom_xg']
 
-    # --- PASSES & ASSISTS PROCESSING (ROBUST EXTRACTION) ---
+    # --- PASSES & ASSISTS PROCESSING (ROBUST FIX FOR STATSBOMB SCHEMA) ---
     df_passes['x'] = df_passes['location'].apply(lambda loc: loc[0] if isinstance(loc, list) else np.nan)
     df_passes['y'] = df_passes['location'].apply(lambda loc: loc[1] if isinstance(loc, list) else np.nan)
     df_passes['end_x'] = df_passes['pass_end_location'].apply(lambda loc: loc[0] if isinstance(loc, list) else np.nan)
     df_passes['end_y'] = df_passes['pass_end_location'].apply(lambda loc: loc[1] if isinstance(loc, list) else np.nan)
 
-    # 1. Extract Assists safely across StatsBomb attributes
-    if 'pass_goal_assisted' in df_passes.columns:
-        is_goal_assisted = df_passes['pass_goal_assisted'].fillna(False).astype(bool)
+    # Detect Assists accurately across all StatsBomb column variants
+    assist_col = None
+    for candidate in ['pass_goal_assist', 'pass_goal_assisted']:
+        if candidate in df_passes.columns:
+            assist_col = candidate
+            break
+
+    if assist_col:
+        df_passes['is_assist'] = df_passes[assist_col].isin([True, 'True', 1, 1.0])
     else:
-        is_goal_assisted = pd.Series(False, index=df_passes.index)
+        df_passes['is_assist'] = False
 
-    if 'pass_assisted_shot_id' in df_passes.columns:
-        # Check if pass resulted in goal shot
-        is_shot_assisted = df_passes['pass_assisted_shot_id'].notna()
+    # Key Passes / Shot Assistant Passes
+    key_pass_col = None
+    for candidate in ['pass_shot_assist', 'pass_shot_assistant']:
+        if candidate in df_passes.columns:
+            key_pass_col = candidate
+            break
+
+    if key_pass_col:
+        df_passes['is_key_pass'] = df_passes[key_pass_col].isin([True, 'True', 1, 1.0]) & (~df_passes['is_assist'])
+    elif 'pass_assisted_shot_id' in df_passes.columns:
+        df_passes['is_key_pass'] = df_passes['pass_assisted_shot_id'].notna() & (~df_passes['is_assist'])
     else:
-        is_shot_assisted = pd.Series(False, index=df_passes.index)
+        df_passes['is_key_pass'] = False
 
-    df_passes['is_assist'] = is_goal_assisted
-
-    # 2. Extract Key Passes / Shot Creation Passes
-    if 'pass_shot_assistant' in df_passes.columns:
-        df_passes['is_key_pass'] = df_passes['pass_shot_assistant'].fillna(False).astype(bool)
-    else:
-        df_passes['is_key_pass'] = is_shot_assisted
-
-    # 3. Extract Pass Outcomes
+    # Pass Completion
     if 'pass_outcome' in df_passes.columns:
         df_passes['is_complete'] = df_passes['pass_outcome'].isna()
     else:
@@ -238,19 +244,27 @@ def draw_goalmouth_placement(data, title_name):
     return fig
 
 def draw_assist_map(pass_data, title_name):
-    """Plots key passes and assists on a vertical pitch."""
+    """Plots key passes (Cyan) and assists (Bright Green) distinctly on a vertical pitch."""
     pitch = VerticalPitch(pitch_type='statsbomb', half=True, pitch_color='#22312b', line_color='#efefef')
     fig, ax = pitch.draw(figsize=(8, 6))
     fig.set_facecolor('#22312b')
 
-    key_p = pass_data[pass_data['is_key_pass'] | pass_data['is_assist']]
-    assists = key_p[key_p['is_assist'] == True]
-    key_passes = key_p[key_p['is_assist'] == False]
+    key_passes = pass_data[pass_data['is_key_pass'] == True]
+    assists = pass_data[pass_data['is_assist'] == True]
 
+    # 1. Key Passes in Cyan
     if not key_passes.empty:
-        pitch.arrows(key_passes.x, key_passes.y, key_passes.end_x, key_passes.end_y, color='#00d4ff', ax=ax, width=2, headwidth=4, label='Key Pass')
+        pitch.arrows(
+            key_passes.x, key_passes.y, key_passes.end_x, key_passes.end_y,
+            color='#00d4ff', ax=ax, width=2, headwidth=4, alpha=0.8, label='Key Pass'
+        )
+
+    # 2. Assists in Bright Green (Larger Arrow Width)
     if not assists.empty:
-        pitch.arrows(assists.x, assists.y, assists.end_x, assists.end_y, color='#60f51d', ax=ax, width=3, headwidth=5, label='Assist')
+        pitch.arrows(
+            assists.x, assists.y, assists.end_x, assists.end_y,
+            color='#60f51d', ax=ax, width=4, headwidth=6, alpha=1.0, label='Assist'
+        )
 
     ax.legend(loc='upper left', facecolor='#22312b', labelcolor='#efefef', fontsize=10)
     plt.title(f'{title_name} - Assist & Shot Creation Map', color='#efefef', fontsize=14)
@@ -262,7 +276,7 @@ def draw_assist_map(pass_data, title_name):
 st.sidebar.header("Navigation")
 mode = st.sidebar.radio("Select Analysis Mode:", ["1. Individual Player", "2. Team Analysis", "3. Player Comparison"])
 
-# Sorted player choices with positions (e.g., Lamine Yamal (RW))
+# Sorted player choices formatted with positions (e.g., Lamine Yamal (RW))
 all_unique_players = set(model_data['player'].unique()).union(set(passes_data['player'].unique()))
 formatted_player_choices = sorted([player_display_map.get(p, f"{p} (FP)") for p in all_unique_players])
 
