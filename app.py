@@ -4,7 +4,6 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 from statsbombpy import sb
-from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from mplsoccer import VerticalPitch
 from dotenv import load_dotenv
@@ -86,7 +85,8 @@ def load_data_and_train_models():
         primary_positions = {}
 
     player_display_map = {}
-    for p in df_shots['player'].dropna().unique():
+    all_players = set(df_shots['player'].dropna().unique()).union(set(df_passes['player'].dropna().unique()))
+    for p in all_players:
         full_pos = primary_positions.get(p, 'FP')
         tag = pos_acronym_map.get(full_pos, 'FP')
         player_display_map[p] = f"{p} ({tag})"
@@ -139,16 +139,37 @@ def load_data_and_train_models():
     model_data.loc[on_target_indices, 'xgot'] = xgot_model.predict_proba(X_xgot)[:, 1]
     model_data['sga'] = model_data['xgot'] - model_data['custom_xg']
 
-    # --- PASSES & ASSISTS PROCESSING ---
+    # --- PASSES & ASSISTS PROCESSING (ROBUST EXTRACTION) ---
     df_passes['x'] = df_passes['location'].apply(lambda loc: loc[0] if isinstance(loc, list) else np.nan)
     df_passes['y'] = df_passes['location'].apply(lambda loc: loc[1] if isinstance(loc, list) else np.nan)
     df_passes['end_x'] = df_passes['pass_end_location'].apply(lambda loc: loc[0] if isinstance(loc, list) else np.nan)
     df_passes['end_y'] = df_passes['pass_end_location'].apply(lambda loc: loc[1] if isinstance(loc, list) else np.nan)
 
-    # Safe attribute parsing
-    df_passes['is_assist'] = df_passes['pass_goal_assisted'].fillna(False) if 'pass_goal_assisted' in df_passes.columns else False
-    df_passes['is_key_pass'] = df_passes['pass_shot_assistant'].fillna(False) if 'pass_shot_assistant' in df_passes.columns else False
-    df_passes['is_complete'] = df_passes['pass_outcome'].isna() if 'pass_outcome' in df_passes.columns else True
+    # 1. Extract Assists safely across StatsBomb attributes
+    if 'pass_goal_assisted' in df_passes.columns:
+        is_goal_assisted = df_passes['pass_goal_assisted'].fillna(False).astype(bool)
+    else:
+        is_goal_assisted = pd.Series(False, index=df_passes.index)
+
+    if 'pass_assisted_shot_id' in df_passes.columns:
+        # Check if pass resulted in goal shot
+        is_shot_assisted = df_passes['pass_assisted_shot_id'].notna()
+    else:
+        is_shot_assisted = pd.Series(False, index=df_passes.index)
+
+    df_passes['is_assist'] = is_goal_assisted
+
+    # 2. Extract Key Passes / Shot Creation Passes
+    if 'pass_shot_assistant' in df_passes.columns:
+        df_passes['is_key_pass'] = df_passes['pass_shot_assistant'].fillna(False).astype(bool)
+    else:
+        df_passes['is_key_pass'] = is_shot_assisted
+
+    # 3. Extract Pass Outcomes
+    if 'pass_outcome' in df_passes.columns:
+        df_passes['is_complete'] = df_passes['pass_outcome'].isna()
+    else:
+        df_passes['is_complete'] = True
 
     passes_clean = df_passes[['player', 'team', 'x', 'y', 'end_x', 'end_y', 'is_assist', 'is_key_pass', 'is_complete']].dropna(subset=['x', 'y', 'player'])
 
@@ -178,10 +199,12 @@ def draw_shotmap(data, title_name):
     fig.set_facecolor('#22312b')
 
     df_non_goals = data[data['is_goal'] == 0]
-    pitch.scatter(df_non_goals.x, df_non_goals.y, s=df_non_goals.custom_xg * 1000, edgecolors='#b2b2b2', c='none', alpha=0.5, ax=ax, label='Miss/Save')
+    if not df_non_goals.empty:
+        pitch.scatter(df_non_goals.x, df_non_goals.y, s=df_non_goals.custom_xg * 1000, edgecolors='#b2b2b2', c='none', alpha=0.5, ax=ax, label='Miss/Save')
     
     df_goals = data[data['is_goal'] == 1]
-    pitch.scatter(df_goals.x, df_goals.y, s=df_goals.custom_xg * 1000, edgecolors='#60f51d', c='#60f51d', ax=ax, label='Goal')
+    if not df_goals.empty:
+        pitch.scatter(df_goals.x, df_goals.y, s=df_goals.custom_xg * 1000, edgecolors='#60f51d', c='#60f51d', ax=ax, label='Goal')
 
     ax.legend(loc='upper right', facecolor='#22312b', labelcolor='#efefef', fontsize=10)
     plt.title(f'{title_name} - Pre-Shot xG Map', color='#efefef', fontsize=14)
@@ -200,8 +223,10 @@ def draw_goalmouth_placement(data, title_name):
     goals = on_target[on_target['is_goal'] == 1]
     saved = on_target[on_target['is_goal'] == 0]
 
-    ax.scatter(saved['y_end'], saved['z_end'], s=saved['xgot'] * 800 + 50, color='#ff4b4b', alpha=0.6, label='Saved/On-Target')
-    ax.scatter(goals['y_end'], goals['z_end'], s=goals['xgot'] * 800 + 50, color='#60f51d', edgecolors='black', label='Goal')
+    if not saved.empty:
+        ax.scatter(saved['y_end'], saved['z_end'], s=saved['xgot'] * 800 + 50, color='#ff4b4b', alpha=0.6, label='Saved/On-Target')
+    if not goals.empty:
+        ax.scatter(goals['y_end'], goals['z_end'], s=goals['xgot'] * 800 + 50, color='#60f51d', edgecolors='black', label='Goal')
 
     ax.set_xlim(34, 46)
     ax.set_ylim(-0.2, 3.2)
@@ -237,8 +262,9 @@ def draw_assist_map(pass_data, title_name):
 st.sidebar.header("Navigation")
 mode = st.sidebar.radio("Select Analysis Mode:", ["1. Individual Player", "2. Team Analysis", "3. Player Comparison"])
 
-# Sorted player list formatted with positions (e.g., Lamine Yamal (RW))
-formatted_player_choices = sorted([player_display_map.get(p, f"{p} (FP)") for p in model_data['player'].unique()])
+# Sorted player choices with positions (e.g., Lamine Yamal (RW))
+all_unique_players = set(model_data['player'].unique()).union(set(passes_data['player'].unique()))
+formatted_player_choices = sorted([player_display_map.get(p, f"{p} (FP)") for p in all_unique_players])
 
 if mode == "1. Individual Player":
     st.header("👤 Individual Player Analytics (xG, xGOT & Playmaking)")
@@ -252,13 +278,13 @@ if mode == "1. Individual Player":
         # Metric cards incorporating goals + assists
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Total Shots", len(player_data))
-        col2.metric("Actual Goals", int(player_data['is_goal'].sum()))
-        col3.metric("Expected Goals (xG)", f"{player_data['custom_xg'].sum():.2f}")
-        col4.metric("Post-Shot xG (xGOT)", f"{player_data['xgot'].sum():.2f}")
-        col5.metric("Assists", int(player_passes['is_assist'].sum()))
-        col6.metric("Key Passes", int(player_passes['is_key_pass'].sum()))
+        col2.metric("Actual Goals", int(player_data['is_goal'].sum()) if not player_data.empty else 0)
+        col3.metric("Expected Goals (xG)", f"{player_data['custom_xg'].sum():.2f}" if not player_data.empty else "0.00")
+        col4.metric("Post-Shot xG (xGOT)", f"{player_data['xgot'].sum():.2f}" if not player_data.empty else "0.00")
+        col5.metric("Assists", int(player_passes['is_assist'].sum()) if not player_passes.empty else 0)
+        col6.metric("Key Passes", int(player_passes['is_key_pass'].sum()) if not player_passes.empty else 0)
 
-        sga_val = player_data['sga'].sum()
+        sga_val = player_data['sga'].sum() if not player_data.empty else 0.0
 
         map_col1, map_col2 = st.columns(2)
         with map_col1:
@@ -286,7 +312,7 @@ if mode == "1. Individual Player":
 
 elif mode == "2. Team Analysis":
     st.header("🛡️ Team Performance & Playmaking Analytics")
-    all_teams = sorted(model_data['team'].unique())
+    all_teams = sorted(set(model_data['team'].dropna().unique()).union(set(passes_data['team'].dropna().unique())))
     selected_team = st.selectbox("Select Team:", all_teams)
 
     if selected_team:
@@ -295,10 +321,10 @@ elif mode == "2. Team Analysis":
 
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Total Shots", len(team_data))
-        col2.metric("Actual Goals", int(team_data['is_goal'].sum()))
-        col3.metric("Cumulative xG", f"{team_data['custom_xg'].sum():.2f}")
-        col4.metric("Assists Recorded", int(team_passes['is_assist'].sum()))
-        col5.metric("Key Passes Created", int(team_passes['is_key_pass'].sum()))
+        col2.metric("Actual Goals", int(team_data['is_goal'].sum()) if not team_data.empty else 0)
+        col3.metric("Cumulative xG", f"{team_data['custom_xg'].sum():.2f}" if not team_data.empty else "0.00")
+        col4.metric("Assists Recorded", int(team_passes['is_assist'].sum()) if not team_passes.empty else 0)
+        col5.metric("Key Passes Created", int(team_passes['is_key_pass'].sum()) if not team_passes.empty else 0)
 
         map_col1, map_col2 = st.columns(2)
         with map_col1:
@@ -317,7 +343,7 @@ elif mode == "2. Team Analysis":
             st.info(get_ai_summary(prompt))
 
 elif mode == "3. Player Comparison":
-    st.header("⚔️️ Creative & Finishing Quality Comparison")
+    st.header("⚔ Creative & Finishing Quality Comparison")
     
     col_p1, col_p2 = st.columns(2)
     with col_p1:
@@ -337,12 +363,20 @@ elif mode == "3. Player Comparison":
                 "Pre-Shot xG", "Post-Shot xGOT", "Shooting Goals Added (SGA)"
             ],
             p1_display: [
-                int(data_p1['is_goal'].sum()), int(pass_p1['is_assist'].sum()), int(pass_p1['is_key_pass'].sum()),
-                f"{data_p1['custom_xg'].sum():.2f}", f"{data_p1['xgot'].sum():.2f}", f"{data_p1['sga'].sum():+.2f}"
+                int(data_p1['is_goal'].sum()) if not data_p1.empty else 0,
+                int(pass_p1['is_assist'].sum()) if not pass_p1.empty else 0,
+                int(pass_p1['is_key_pass'].sum()) if not pass_p1.empty else 0,
+                f"{data_p1['custom_xg'].sum():.2f}" if not data_p1.empty else "0.00",
+                f"{data_p1['xgot'].sum():.2f}" if not data_p1.empty else "0.00",
+                f"{data_p1['sga'].sum():+.2f}" if not data_p1.empty else "+0.00"
             ],
             p2_display: [
-                int(data_p2['is_goal'].sum()), int(pass_p2['is_assist'].sum()), int(pass_p2['is_key_pass'].sum()),
-                f"{data_p2['custom_xg'].sum():.2f}", f"{data_p2['xgot'].sum():.2f}", f"{data_p2['sga'].sum():+.2f}"
+                int(data_p2['is_goal'].sum()) if not data_p2.empty else 0,
+                int(pass_p2['is_assist'].sum()) if not pass_p2.empty else 0,
+                int(pass_p2['is_key_pass'].sum()) if not pass_p2.empty else 0,
+                f"{data_p2['custom_xg'].sum():.2f}" if not data_p2.empty else "0.00",
+                f"{data_p2['xgot'].sum():.2f}" if not data_p2.empty else "0.00",
+                f"{data_p2['sga'].sum():+.2f}" if not data_p2.empty else "+0.00"
             ]
         })
         st.table(comp_df.set_index("Metric"))
@@ -357,8 +391,8 @@ elif mode == "3. Player Comparison":
         if st.button("Generate Tactical Comparison Report"):
             prompt = f"""
             Compare the finishing execution and playmaking threat of two players at Euro 2024:
-            - {p1_display}: Goals = {data_p1['is_goal'].sum()}, xG = {data_p1['custom_xg'].sum():.2f}, xGOT = {data_p1['xgot'].sum():.2f}, Assists = {pass_p1['is_assist'].sum()}, Key Passes = {pass_p1['is_key_pass'].sum()}
-            - {p2_display}: Goals = {data_p2['is_goal'].sum()}, xG = {data_p2['custom_xg'].sum():.2f}, xGOT = {data_p2['xgot'].sum():.2f}, Assists = {pass_p2['is_assist'].sum()}, Key Passes = {pass_p2['is_key_pass'].sum()}
+            - {p1_display}: Goals = {data_p1['is_goal'].sum() if not data_p1.empty else 0}, xG = {data_p1['custom_xg'].sum():.2f} if not data_p1.empty else 0, xGOT = {data_p1['xgot'].sum():.2f} if not data_p1.empty else 0, Assists = {pass_p1['is_assist'].sum() if not pass_p1.empty else 0}, Key Passes = {pass_p1['is_key_pass'].sum() if not pass_p1.empty else 0}
+            - {p2_display}: Goals = {data_p2['is_goal'].sum() if not data_p2.empty else 0}, xG = {data_p2['custom_xg'].sum():.2f} if not data_p2.empty else 0, xGOT = {data_p2['xgot'].sum():.2f} if not data_p2.empty else 0, Assists = {pass_p2['is_assist'].sum() if not pass_p2.empty else 0}, Key Passes = {pass_p2['is_key_pass'].sum() if not pass_p2.empty else 0}
             Write a 2-paragraph scouting report identifying who was more complete across finishing clinicality and playmaking creation.
             """
             st.info(get_ai_summary(prompt))
