@@ -13,7 +13,7 @@ from google import genai
 # Set page configuration
 st.set_page_config(page_title="Euro 2024 xG & xGOT Analytics Hub", layout="wide")
 
-st.title("⚽ Euro 2024 Interactive xG & xGOT Analytics Hub")
+st.title("⚽ Euro 2024 Interactive xG, xGOT & Assists Analytics Hub")
 
 # ==============================================================================
 # SECURE API KEY SETUP
@@ -30,7 +30,7 @@ def init_genai_client(key):
 client = init_genai_client(api_key)
 
 # ==============================================================================
-# CACHED DATA PIPELINE & MODELS (xG + xGOT)
+# CACHED DATA PIPELINE & MODELS (xG + xGOT + Assists + Positions)
 # ==============================================================================
 @st.cache_data(show_spinner="Extracting Euro 2024 dataset from StatsBomb...")
 def load_data_and_train_models():
@@ -38,37 +38,77 @@ def load_data_and_train_models():
     match_ids = matches['match_id'].tolist()
 
     all_shots = []
+    all_passes = []
+    all_positions = []
+    
     progress_bar = st.progress(0, text="Fetching match events...")
     
     for idx, mid in enumerate(match_ids):
         events = sb.events(match_id=mid)
+        
+        # 1. Filter Shots
         shots = events[(events['type'] == 'Shot') & (events['shot_type'] != 'Penalty')].copy()
         all_shots.append(shots)
+        
+        # 2. Filter Passes
+        passes = events[events['type'] == 'Pass'].copy()
+        all_passes.append(passes)
+        
+        # 3. Filter Player Positions
+        if 'player' in events.columns and 'position' in events.columns:
+            pos_data = events[['player', 'position']].dropna()
+            all_positions.append(pos_data)
+
         progress_bar.progress((idx + 1) / len(match_ids), text=f"Processing match {idx+1}/{len(match_ids)}...")
     
     progress_bar.empty()
 
-    df = pd.concat(all_shots, ignore_index=True)
+    df_shots = pd.concat(all_shots, ignore_index=True)
+    df_passes = pd.concat(all_passes, ignore_index=True)
+    df_positions = pd.concat(all_positions, ignore_index=True) if all_positions else pd.DataFrame()
 
-    # 1. Base Pre-Shot Features
-    df['x'] = df['location'].apply(lambda loc: loc[0])
-    df['y'] = df['location'].apply(lambda loc: loc[1])
-    df['distance'] = np.sqrt((120 - df['x'])**2 + (40 - df['y'])**2)
-    df['dist_post_A'] = np.sqrt((120 - df['x'])**2 + (36 - df['y'])**2)
-    df['dist_post_B'] = np.sqrt((120 - df['x'])**2 + (44 - df['y'])**2)
-    cos_angle = (df['dist_post_A']**2 + df['dist_post_B']**2 - 8**2) / (2 * df['dist_post_A'] * df['dist_post_B'])
-    df['angle'] = np.arccos(np.clip(cos_angle, -1, 1))
-    df['is_header'] = np.where(df['shot_body_part'] == 'Head', 1, 0)
-    
-    if 'under_pressure' in df.columns:
-        df['under_pressure'] = df['under_pressure'].fillna(False).astype(int)
+    # --- POSITION TAGGING LOGIC ---
+    pos_acronym_map = {
+        'Right Wing': 'RW', 'Left Wing': 'LW', 'Center Forward': 'ST',
+        'Right Center Forward': 'ST', 'Left Center Forward': 'ST',
+        'Attacking Midfield': 'CAM', 'Right Attacking Midfield': 'RAM', 'Left Attacking Midfield': 'LAM',
+        'Central Midfield': 'CM', 'Right Midfield': 'RM', 'Left Midfield': 'LM',
+        'Defensive Midfield': 'CDM', 'Right Defensive Midfield': 'CDM', 'Left Defensive Midfield': 'CDM',
+        'Right Back': 'RB', 'Left Back': 'LB', 'Center Back': 'CB',
+        'Right Center Back': 'CB', 'Left Center Back': 'CB', 'Goalkeeper': 'GK'
+    }
+
+    if not df_positions.empty:
+        primary_positions = df_positions.groupby('player')['position'].agg(
+            lambda x: x.mode()[0] if not x.empty else 'FP'
+        ).to_dict()
     else:
-        df['under_pressure'] = 0
+        primary_positions = {}
 
-    df['is_goal'] = np.where(df['shot_outcome'] == 'Goal', 1, 0)
+    player_display_map = {}
+    for p in df_shots['player'].dropna().unique():
+        full_pos = primary_positions.get(p, 'FP')
+        tag = pos_acronym_map.get(full_pos, 'FP')
+        player_display_map[p] = f"{p} ({tag})"
 
-    # Clean dataset
-    model_data = df[['player', 'team', 'distance', 'angle', 'is_header', 'under_pressure', 
+    # --- SHOTS PROCESSING & FEATURE ENGINEERING ---
+    df_shots['x'] = df_shots['location'].apply(lambda loc: loc[0])
+    df_shots['y'] = df_shots['location'].apply(lambda loc: loc[1])
+    df_shots['distance'] = np.sqrt((120 - df_shots['x'])**2 + (40 - df_shots['y'])**2)
+    df_shots['dist_post_A'] = np.sqrt((120 - df_shots['x'])**2 + (36 - df_shots['y'])**2)
+    df_shots['dist_post_B'] = np.sqrt((120 - df_shots['x'])**2 + (44 - df_shots['y'])**2)
+    cos_angle = (df_shots['dist_post_A']**2 + df_shots['dist_post_B']**2 - 8**2) / (2 * df_shots['dist_post_A'] * df_shots['dist_post_B'])
+    df_shots['angle'] = np.arccos(np.clip(cos_angle, -1, 1))
+    df_shots['is_header'] = np.where(df_shots['shot_body_part'] == 'Head', 1, 0)
+    
+    if 'under_pressure' in df_shots.columns:
+        df_shots['under_pressure'] = df_shots['under_pressure'].fillna(False).astype(int)
+    else:
+        df_shots['under_pressure'] = 0
+
+    df_shots['is_goal'] = np.where(df_shots['shot_outcome'] == 'Goal', 1, 0)
+
+    model_data = df_shots[['player', 'team', 'distance', 'angle', 'is_header', 'under_pressure', 
                            'is_goal', 'x', 'y', 'shot_body_part', 'shot_end_location', 'shot_outcome']].dropna()
 
     # --- TRAIN PRE-SHOT xG MODEL ---
@@ -79,39 +119,43 @@ def load_data_and_train_models():
     xg_model.fit(X_xg, y_xg)
     model_data['custom_xg'] = xg_model.predict_proba(X_xg)[:, 1]
 
-    # --- FEATURE ENGINEERING FOR POST-SHOT xGOT ---
-    # Extract end coordinates (y_end: goal width 36-44, z_end: goal height 0-2.67)
+    # --- POST-SHOT xGOT MODEL ---
     model_data['y_end'] = model_data['shot_end_location'].apply(lambda loc: loc[1] if isinstance(loc, list) and len(loc) > 1 else np.nan)
     model_data['z_end'] = model_data['shot_end_location'].apply(lambda loc: loc[2] if isinstance(loc, list) and len(loc) > 2 else 0.0)
 
-    # Identify shots on target (Goals and Saved shots inside the goal frame)
     on_target_outcomes = ['Goal', 'Saved', 'Saved to Post', 'Saved Off Target']
     model_data['is_on_target'] = model_data['shot_outcome'].isin(on_target_outcomes).astype(int)
-
-    # Goalmouth distance from center (y=40.0, z=0.0)
     model_data['goalmouth_dist_center'] = np.sqrt((model_data['y_end'] - 40.0)**2 + (model_data['z_end'] - 0.0)**2)
 
-    # --- TRAIN POST-SHOT xGOT MODEL ---
-    # Model only trains on actual shots on target
     on_target_df = model_data[model_data['is_on_target'] == 1].dropna(subset=['goalmouth_dist_center'])
-    
     X_xgot = on_target_df[['custom_xg', 'goalmouth_dist_center']]
     y_xgot = on_target_df['is_goal']
 
     xgot_model = LogisticRegression()
     xgot_model.fit(X_xgot, y_xgot)
 
-    # Calculate xGOT: On-target shots get probability; off-target shots get 0.0
     model_data['xgot'] = 0.0
     on_target_indices = on_target_df.index
     model_data.loc[on_target_indices, 'xgot'] = xgot_model.predict_proba(X_xgot)[:, 1]
-
-    # Shooting Goals Added (SGA = xGOT - xG)
     model_data['sga'] = model_data['xgot'] - model_data['custom_xg']
 
-    return model_data
+    # --- PASSES & ASSISTS PROCESSING ---
+    df_passes['x'] = df_passes['location'].apply(lambda loc: loc[0] if isinstance(loc, list) else np.nan)
+    df_passes['y'] = df_passes['location'].apply(lambda loc: loc[1] if isinstance(loc, list) else np.nan)
+    df_passes['end_x'] = df_passes['pass_end_location'].apply(lambda loc: loc[0] if isinstance(loc, list) else np.nan)
+    df_passes['end_y'] = df_passes['pass_end_location'].apply(lambda loc: loc[1] if isinstance(loc, list) else np.nan)
 
-model_data = load_data_and_train_models()
+    # Safe attribute parsing
+    df_passes['is_assist'] = df_passes['pass_goal_assisted'].fillna(False) if 'pass_goal_assisted' in df_passes.columns else False
+    df_passes['is_key_pass'] = df_passes['pass_shot_assistant'].fillna(False) if 'pass_shot_assistant' in df_passes.columns else False
+    df_passes['is_complete'] = df_passes['pass_outcome'].isna() if 'pass_outcome' in df_passes.columns else True
+
+    passes_clean = df_passes[['player', 'team', 'x', 'y', 'end_x', 'end_y', 'is_assist', 'is_key_pass', 'is_complete']].dropna(subset=['x', 'y', 'player'])
+
+    return model_data, passes_clean, player_display_map
+
+model_data, passes_data, player_display_map = load_data_and_train_models()
+reverse_player_map = {v: k for k, v in player_display_map.items()}
 
 # ==============================================================================
 # HELPER FUNCTIONS
@@ -149,13 +193,10 @@ def draw_goalmouth_placement(data, title_name):
     fig.set_facecolor('#22312b')
     ax.set_facecolor('#1e2923')
 
-    # Draw Goal Frame (Width: 36 to 44, Height: 0 to 2.67)
     ax.plot([36, 36, 44, 44], [0, 2.67, 2.67, 0], color='white', linewidth=4)
-    ax.axhline(0, color='gray', linestyle='--') # Ground line
+    ax.axhline(0, color='gray', linestyle='--')
 
     on_target = data[data['is_on_target'] == 1]
-    
-    # Scatter plot of shot placement sized by xGOT
     goals = on_target[on_target['is_goal'] == 1]
     saved = on_target[on_target['is_goal'] == 0]
 
@@ -171,113 +212,153 @@ def draw_goalmouth_placement(data, title_name):
     plt.title(f'{title_name} - Post-Shot Goalmouth Placement (xGOT)', color='white', fontsize=14)
     return fig
 
+def draw_assist_map(pass_data, title_name):
+    """Plots key passes and assists on a vertical pitch."""
+    pitch = VerticalPitch(pitch_type='statsbomb', half=True, pitch_color='#22312b', line_color='#efefef')
+    fig, ax = pitch.draw(figsize=(8, 6))
+    fig.set_facecolor('#22312b')
+
+    key_p = pass_data[pass_data['is_key_pass'] | pass_data['is_assist']]
+    assists = key_p[key_p['is_assist'] == True]
+    key_passes = key_p[key_p['is_assist'] == False]
+
+    if not key_passes.empty:
+        pitch.arrows(key_passes.x, key_passes.y, key_passes.end_x, key_passes.end_y, color='#00d4ff', ax=ax, width=2, headwidth=4, label='Key Pass')
+    if not assists.empty:
+        pitch.arrows(assists.x, assists.y, assists.end_x, assists.end_y, color='#60f51d', ax=ax, width=3, headwidth=5, label='Assist')
+
+    ax.legend(loc='upper left', facecolor='#22312b', labelcolor='#efefef', fontsize=10)
+    plt.title(f'{title_name} - Assist & Shot Creation Map', color='#efefef', fontsize=14)
+    return fig
+
 # ==============================================================================
 # NAVIGATION & MODES
 # ==============================================================================
 st.sidebar.header("Navigation")
 mode = st.sidebar.radio("Select Analysis Mode:", ["1. Individual Player", "2. Team Analysis", "3. Player Comparison"])
 
+# Sorted player list formatted with positions (e.g., Lamine Yamal (RW))
+formatted_player_choices = sorted([player_display_map.get(p, f"{p} (FP)") for p in model_data['player'].unique()])
+
 if mode == "1. Individual Player":
-    st.header("👤 Individual Player Analytics (xG vs xGOT)")
-    all_players = sorted(model_data['player'].unique())
-    selected_player = st.selectbox("Select or type player name:", all_players)
+    st.header("👤 Individual Player Analytics (xG, xGOT & Playmaking)")
+    selected_display = st.selectbox("Select or type player name (Position tagged):", formatted_player_choices)
+    selected_player = reverse_player_map.get(selected_display, selected_display)
 
     if selected_player:
         player_data = model_data[model_data['player'] == selected_player]
+        player_passes = passes_data[passes_data['player'] == selected_player]
 
-        # Metric cards incorporating xGOT and SGA
-        col1, col2, col3, col4, col5 = st.columns(5)
+        # Metric cards incorporating goals + assists
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Total Shots", len(player_data))
         col2.metric("Actual Goals", int(player_data['is_goal'].sum()))
         col3.metric("Expected Goals (xG)", f"{player_data['custom_xg'].sum():.2f}")
         col4.metric("Post-Shot xG (xGOT)", f"{player_data['xgot'].sum():.2f}")
-        
+        col5.metric("Assists", int(player_passes['is_assist'].sum()))
+        col6.metric("Key Passes", int(player_passes['is_key_pass'].sum()))
+
         sga_val = player_data['sga'].sum()
-        col5.metric("Shooting Goals Added", f"{sga_val:+.2f}", delta_color="normal" if sga_val >= 0 else "inverse")
 
         map_col1, map_col2 = st.columns(2)
         with map_col1:
-            st.pyplot(draw_shotmap(player_data, selected_player))
+            st.pyplot(draw_shotmap(player_data, selected_display))
         with map_col2:
-            st.pyplot(draw_goalmouth_placement(player_data, selected_player))
+            st.pyplot(draw_assist_map(player_passes, selected_display))
 
-        st.subheader("🤖 AI Finishing Evaluation")
-        if st.button("Generate Finishing Breakdown"):
+        st.pyplot(draw_goalmouth_placement(player_data, selected_display))
+
+        st.subheader("🤖 AI Performance & Playmaking Evaluation")
+        if st.button("Generate Tactical Scouting Report"):
             prompt = f"""
-            Act as an elite finishing coach evaluating {selected_player} at Euro 2024:
+            Act as an elite football analyst evaluating {selected_display} at Euro 2024:
             - Pre-Shot xG: {player_data['custom_xg'].sum():.2f}
             - Post-Shot xGOT: {player_data['xgot'].sum():.2f}
             - Actual Goals: {player_data['is_goal'].sum()}
-            - Shooting Goals Added (xGOT - xG): {sga_val:+.2f}
+            - Shooting Goals Added (SGA): {sga_val:+.2f}
+            - Assists: {player_passes['is_assist'].sum()}
+            - Key Passes / Shot Creations: {player_passes['is_key_pass'].sum()}
+            - Pass Completion Rate: {(player_passes['is_complete'].sum()/len(player_passes)*100 if len(player_passes)>0 else 0):.1f}%
             
-            Write a 2-paragraph evaluation comparing their chance quality vs their finishing execution (did their shot placement increase or decrease their chances of scoring?).
+            Write a 2-paragraph evaluation comparing their goalscoring threat and finishing quality against their creative playmaking and assist threat.
             """
             st.info(get_ai_summary(prompt))
 
 elif mode == "2. Team Analysis":
-    st.header("🛡️ Team Performance Analytics (xG vs xGOT)")
+    st.header("🛡️ Team Performance & Playmaking Analytics")
     all_teams = sorted(model_data['team'].unique())
     selected_team = st.selectbox("Select Team:", all_teams)
 
     if selected_team:
         team_data = model_data[model_data['team'] == selected_team]
+        team_passes = passes_data[passes_data['team'] == selected_team]
 
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Total Shots", len(team_data))
         col2.metric("Actual Goals", int(team_data['is_goal'].sum()))
         col3.metric("Cumulative xG", f"{team_data['custom_xg'].sum():.2f}")
-        col4.metric("Cumulative xGOT", f"{team_data['xgot'].sum():.2f}")
-        
-        team_sga = team_data['sga'].sum()
-        col5.metric("Team SGA", f"{team_sga:+.2f}")
+        col4.metric("Assists Recorded", int(team_passes['is_assist'].sum()))
+        col5.metric("Key Passes Created", int(team_passes['is_key_pass'].sum()))
 
         map_col1, map_col2 = st.columns(2)
         with map_col1:
             st.pyplot(draw_shotmap(team_data, selected_team))
         with map_col2:
-            st.pyplot(draw_goalmouth_placement(team_data, selected_team))
+            st.pyplot(draw_assist_map(team_passes, selected_team))
 
-        st.subheader("🤖 AI Team Finishing Analysis")
+        st.subheader("🤖 AI Team Finishing & Playmaking Overview")
         if st.button("Generate Team AI Analysis"):
             prompt = f"""
-            Analyze team shot execution for {selected_team} at Euro 2024:
-            - Pre-Shot xG: {team_data['custom_xg'].sum():.2f}, Post-Shot xGOT: {team_data['xgot'].sum():.2f}, Goals: {team_data['is_goal'].sum()}
-            Provide a 2-paragraph overview evaluating whether the team's strikers enhanced chance quality through superior shot placement.
+            Analyze team shot execution and creative output for {selected_team} at Euro 2024:
+            - Cumulative xG: {team_data['custom_xg'].sum():.2f}, xGOT: {team_data['xgot'].sum():.2f}, Goals: {team_data['is_goal'].sum()}
+            - Team Assists: {team_passes['is_assist'].sum()}, Key Passes: {team_passes['is_key_pass'].sum()}
+            Provide a 2-paragraph overview evaluating both shot conversion and chance creation efficiency.
             """
             st.info(get_ai_summary(prompt))
 
 elif mode == "3. Player Comparison":
-    st.header("⚔️ Finishing Quality Comparison (xGOT & SGA)")
-    all_players = sorted(model_data['player'].unique())
+    st.header("⚔️️ Creative & Finishing Quality Comparison")
+    
     col_p1, col_p2 = st.columns(2)
     with col_p1:
-        p1 = st.selectbox("Select First Player:", all_players, index=0)
+        p1_display = st.selectbox("Select First Player:", formatted_player_choices, index=0)
+        p1 = reverse_player_map.get(p1_display, p1_display)
     with col_p2:
-        p2 = st.selectbox("Select Second Player:", all_players, index=min(1, len(all_players)-1))
+        p2_display = st.selectbox("Select Second Player:", formatted_player_choices, index=min(1, len(formatted_player_choices)-1))
+        p2 = reverse_player_map.get(p2_display, p2_display)
 
     if p1 and p2:
-        data_p1 = model_data[model_data['player'] == p1]
-        data_p2 = model_data[model_data['player'] == p2]
+        data_p1, pass_p1 = model_data[model_data['player'] == p1], passes_data[passes_data['player'] == p1]
+        data_p2, pass_p2 = model_data[model_data['player'] == p2], passes_data[passes_data['player'] == p2]
 
         comp_df = pd.DataFrame({
-            "Metric": ["Total Shots", "Goals Scored", "Pre-Shot xG", "Post-Shot xGOT", "Shooting Goals Added (SGA)"],
-            p1: [len(data_p1), int(data_p1['is_goal'].sum()), f"{data_p1['custom_xg'].sum():.2f}", f"{data_p1['xgot'].sum():.2f}", f"{data_p1['sga'].sum():+.2f}"],
-            p2: [len(data_p2), int(data_p2['is_goal'].sum()), f"{data_p2['custom_xg'].sum():.2f}", f"{data_p2['xgot'].sum():.2f}", f"{data_p2['sga'].sum():+.2f}"]
+            "Metric": [
+                "Goals Scored", "Assists", "Key Passes (Shot Creates)", 
+                "Pre-Shot xG", "Post-Shot xGOT", "Shooting Goals Added (SGA)"
+            ],
+            p1_display: [
+                int(data_p1['is_goal'].sum()), int(pass_p1['is_assist'].sum()), int(pass_p1['is_key_pass'].sum()),
+                f"{data_p1['custom_xg'].sum():.2f}", f"{data_p1['xgot'].sum():.2f}", f"{data_p1['sga'].sum():+.2f}"
+            ],
+            p2_display: [
+                int(data_p2['is_goal'].sum()), int(pass_p2['is_assist'].sum()), int(pass_p2['is_key_pass'].sum()),
+                f"{data_p2['custom_xg'].sum():.2f}", f"{data_p2['xgot'].sum():.2f}", f"{data_p2['sga'].sum():+.2f}"
+            ]
         })
         st.table(comp_df.set_index("Metric"))
 
         map_col1, map_col2 = st.columns(2)
         with map_col1:
-            st.pyplot(draw_goalmouth_placement(data_p1, p1))
+            st.pyplot(draw_assist_map(pass_p1, p1_display))
         with map_col2:
-            st.pyplot(draw_goalmouth_placement(data_p2, p2))
+            st.pyplot(draw_assist_map(pass_p2, p2_display))
 
-        st.subheader("🤖 AI Finishing Scouting Comparison")
-        if st.button("Generate Finishing Scouting Report"):
+        st.subheader("🤖 AI Scouting Comparison")
+        if st.button("Generate Tactical Comparison Report"):
             prompt = f"""
-            Compare the finishing execution of two players at Euro 2024:
-            - {p1}: Pre-Shot xG = {data_p1['custom_xg'].sum():.2f}, Post-Shot xGOT = {data_p1['xgot'].sum():.2f}, SGA = {data_p1['sga'].sum():+.2f}
-            - {p2}: Pre-Shot xG = {data_p2['custom_xg'].sum():.2f}, Post-Shot xGOT = {data_p2['xgot'].sum():.2f}, SGA = {data_p2['sga'].sum():+.2f}
-            Write a 2-paragraph scouting report identifying who was more clinical at altering chance quality through shot placement.
+            Compare the finishing execution and playmaking threat of two players at Euro 2024:
+            - {p1_display}: Goals = {data_p1['is_goal'].sum()}, xG = {data_p1['custom_xg'].sum():.2f}, xGOT = {data_p1['xgot'].sum():.2f}, Assists = {pass_p1['is_assist'].sum()}, Key Passes = {pass_p1['is_key_pass'].sum()}
+            - {p2_display}: Goals = {data_p2['is_goal'].sum()}, xG = {data_p2['custom_xg'].sum():.2f}, xGOT = {data_p2['xgot'].sum():.2f}, Assists = {pass_p2['is_assist'].sum()}, Key Passes = {pass_p2['is_key_pass'].sum()}
+            Write a 2-paragraph scouting report identifying who was more complete across finishing clinicality and playmaking creation.
             """
             st.info(get_ai_summary(prompt))
