@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
+import seaborn as sns
 from statsbombpy import sb
 from sklearn.linear_model import LogisticRegression
 from mplsoccer import VerticalPitch
@@ -12,7 +13,7 @@ from google import genai
 # Set page configuration
 st.set_page_config(page_title="Euro 2024 xG & xGOT Analytics Hub", layout="wide")
 
-st.title("⚽ Euro 2024 Interactive xG, xGOT & Assists Analytics Hub")
+st.title("⚽ Euro 2024 Interactive xG, xGOT & Playmaking Analytics Hub")
 
 # ==============================================================================
 # SECURE API KEY SETUP
@@ -29,7 +30,7 @@ def init_genai_client(key):
 client = init_genai_client(api_key)
 
 # ==============================================================================
-# CACHED DATA PIPELINE & MODELS (xG + xGOT + Assists + Positions)
+# CACHED DATA PIPELINE & MODELS (xG + xGOT + Assists + Positions + Heatmaps)
 # ==============================================================================
 @st.cache_data(show_spinner="Extracting Euro 2024 dataset from StatsBomb...")
 def load_data_and_train_models():
@@ -39,11 +40,17 @@ def load_data_and_train_models():
     all_shots = []
     all_passes = []
     all_positions = []
+    all_raw_events = []
     
     progress_bar = st.progress(0, text="Fetching match events...")
     
     for idx, mid in enumerate(match_ids):
         events = sb.events(match_id=mid)
+        
+        # 0. Store All Events with Location for Heatmaps
+        if 'location' in events.columns and 'player' in events.columns:
+            loc_events = events.dropna(subset=['location', 'player'])[['player', 'team', 'location', 'type']].copy()
+            all_raw_events.append(loc_events)
         
         # 1. Filter Shots
         shots = events[(events['type'] == 'Shot') & (events['shot_type'] != 'Penalty')].copy()
@@ -65,6 +72,7 @@ def load_data_and_train_models():
     df_shots = pd.concat(all_shots, ignore_index=True)
     df_passes = pd.concat(all_passes, ignore_index=True)
     df_positions = pd.concat(all_positions, ignore_index=True) if all_positions else pd.DataFrame()
+    df_raw_events = pd.concat(all_raw_events, ignore_index=True) if all_raw_events else pd.DataFrame()
 
     # --- POSITION TAGGING LOGIC ---
     pos_acronym_map = {
@@ -139,13 +147,12 @@ def load_data_and_train_models():
     model_data.loc[on_target_indices, 'xgot'] = xgot_model.predict_proba(X_xgot)[:, 1]
     model_data['sga'] = model_data['xgot'] - model_data['custom_xg']
 
-    # --- PASSES & ASSISTS PROCESSING (ROBUST FIX FOR STATSBOMB SCHEMA) ---
+    # --- PASSES & ASSISTS PROCESSING ---
     df_passes['x'] = df_passes['location'].apply(lambda loc: loc[0] if isinstance(loc, list) else np.nan)
     df_passes['y'] = df_passes['location'].apply(lambda loc: loc[1] if isinstance(loc, list) else np.nan)
     df_passes['end_x'] = df_passes['pass_end_location'].apply(lambda loc: loc[0] if isinstance(loc, list) else np.nan)
     df_passes['end_y'] = df_passes['pass_end_location'].apply(lambda loc: loc[1] if isinstance(loc, list) else np.nan)
 
-    # Detect Assists accurately across all StatsBomb column variants
     assist_col = None
     for candidate in ['pass_goal_assist', 'pass_goal_assisted']:
         if candidate in df_passes.columns:
@@ -157,7 +164,6 @@ def load_data_and_train_models():
     else:
         df_passes['is_assist'] = False
 
-    # Key Passes / Shot Assistant Passes
     key_pass_col = None
     for candidate in ['pass_shot_assist', 'pass_shot_assistant']:
         if candidate in df_passes.columns:
@@ -171,7 +177,6 @@ def load_data_and_train_models():
     else:
         df_passes['is_key_pass'] = False
 
-    # Pass Completion
     if 'pass_outcome' in df_passes.columns:
         df_passes['is_complete'] = df_passes['pass_outcome'].isna()
     else:
@@ -179,9 +184,9 @@ def load_data_and_train_models():
 
     passes_clean = df_passes[['player', 'team', 'x', 'y', 'end_x', 'end_y', 'is_assist', 'is_key_pass', 'is_complete']].dropna(subset=['x', 'y', 'player'])
 
-    return model_data, passes_clean, player_display_map
+    return model_data, passes_clean, df_raw_events, player_display_map
 
-model_data, passes_data, player_display_map = load_data_and_train_models()
+model_data, passes_data, raw_events_data, player_display_map = load_data_and_train_models()
 reverse_player_map = {v: k for k, v in player_display_map.items()}
 
 # ==============================================================================
@@ -252,14 +257,12 @@ def draw_assist_map(pass_data, title_name):
     key_passes = pass_data[pass_data['is_key_pass'] == True]
     assists = pass_data[pass_data['is_assist'] == True]
 
-    # 1. Key Passes in Cyan
     if not key_passes.empty:
         pitch.arrows(
             key_passes.x, key_passes.y, key_passes.end_x, key_passes.end_y,
             color='#00d4ff', ax=ax, width=2, headwidth=4, alpha=0.8, label='Key Pass'
         )
 
-    # 2. Assists in Bright Green (Larger Arrow Width)
     if not assists.empty:
         pitch.arrows(
             assists.x, assists.y, assists.end_x, assists.end_y,
@@ -270,13 +273,44 @@ def draw_assist_map(pass_data, title_name):
     plt.title(f'{title_name} - Assist & Shot Creation Map', color='#efefef', fontsize=14)
     return fig
 
+def draw_player_heatmap(events_df, player_name, title_name):
+    """
+    Plots a Kernel Density Estimation (KDE) heatmap of all touch & action locations 
+    for a given player across Euro 2024.
+    """
+    player_events = events_df[events_df['player'] == player_name].copy()
+    
+    player_events['x'] = player_events['location'].apply(lambda loc: loc[0] if isinstance(loc, list) else np.nan)
+    player_events['y'] = player_events['location'].apply(lambda loc: loc[1] if isinstance(loc, list) else np.nan)
+    
+    loc_data = player_events.dropna(subset=['x', 'y'])
+
+    pitch = VerticalPitch(pitch_type='statsbomb', pitch_color='#22312b', line_color='#efefef')
+    fig, ax = pitch.draw(figsize=(8, 6))
+    fig.set_facecolor('#22312b')
+
+    if not loc_data.empty and len(loc_data) > 5:
+        # Note: X and Y coordinates are swapped for vertical pitch orientation in Seaborn
+        sns.kdeplot(
+            x=loc_data['y'], 
+            y=loc_data['x'],
+            fill=True,
+            cmap='hot',
+            thresh=0.05,
+            levels=100,
+            alpha=0.6,
+            ax=ax
+        )
+    
+    plt.title(f'{title_name} - Positional Density Heatmap', color='#efefef', fontsize=14)
+    return fig
+
 # ==============================================================================
 # NAVIGATION & MODES
 # ==============================================================================
 st.sidebar.header("Navigation")
 mode = st.sidebar.radio("Select Analysis Mode:", ["1. Individual Player", "2. Team Analysis", "3. Player Comparison"])
 
-# Sorted player choices formatted with positions (e.g., Lamine Yamal (RW))
 all_unique_players = set(model_data['player'].unique()).union(set(passes_data['player'].unique()))
 formatted_player_choices = sorted([player_display_map.get(p, f"{p} (FP)") for p in all_unique_players])
 
@@ -289,7 +323,6 @@ if mode == "1. Individual Player":
         player_data = model_data[model_data['player'] == selected_player]
         player_passes = passes_data[passes_data['player'] == selected_player]
 
-        # Metric cards incorporating goals + assists
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Total Shots", len(player_data))
         col2.metric("Actual Goals", int(player_data['is_goal'].sum()) if not player_data.empty else 0)
@@ -307,6 +340,10 @@ if mode == "1. Individual Player":
             st.pyplot(draw_assist_map(player_passes, selected_display))
 
         st.pyplot(draw_goalmouth_placement(player_data, selected_display))
+
+        st.markdown("---")
+        st.subheader("🔥 Player Positional & Activity Heatmap")
+        st.pyplot(draw_player_heatmap(raw_events_data, selected_player, selected_display))
 
         st.subheader("🤖 AI Performance & Playmaking Evaluation")
         if st.button("Generate Tactical Scouting Report"):
@@ -400,6 +437,14 @@ elif mode == "3. Player Comparison":
             st.pyplot(draw_assist_map(pass_p1, p1_display))
         with map_col2:
             st.pyplot(draw_assist_map(pass_p2, p2_display))
+
+        st.markdown("---")
+        st.subheader("🔥 Heatmap Comparison")
+        heat_col1, heat_col2 = st.columns(2)
+        with heat_col1:
+            st.pyplot(draw_player_heatmap(raw_events_data, p1, p1_display))
+        with heat_col2:
+            st.pyplot(draw_player_heatmap(raw_events_data, p2, p2_display))
 
         st.subheader("🤖 AI Scouting Comparison")
         if st.button("Generate Tactical Comparison Report"):
